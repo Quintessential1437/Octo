@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Octopus Head AR</title>
+<style>
+:root{--bg:#120d18;--fg:#f6e9ff;--accent:#d58bf0;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#120d18;--fg:#f6e9ff}}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,sans-serif;overflow:hidden}
+canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+#ui{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;background:rgba(14,8,20,.85)}
+#ui h1{margin:0;font-size:26px}
+#ui p{margin:0;max-width:320px;opacity:.85;font-size:15px;line-height:1.4}
+button{background:var(--accent);color:#220a33;border:0;border-radius:999px;padding:14px 26px;font-size:16px;font-weight:700}
+button.ghost{background:transparent;color:var(--fg);border:1px solid #ffffff44}
+#hud{position:absolute;left:0;right:0;bottom:calc(14px + env(safe-area-inset-bottom,0px));text-align:center;font-size:13px;opacity:.9;pointer-events:none;text-shadow:0 1px 4px #000}
+#tag{position:absolute;top:calc(8px + env(safe-area-inset-top,0px));left:10px;font-size:12px;background:#0008;color:#fff;padding:4px 8px;border-radius:8px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="tag" style="display:none"></div>
+<div id="hud"></div>
+<div id="ui">
+  <h1>🐙 Octopus Hat</h1>
+  <p>An octopus sits on your head and its tentacles swing, drape and wiggle as you move. Use the front camera and keep your face in view.</p>
+  <button id="go">Start camera</button>
+  <button id="demo" class="ghost">No camera: drag the head</button>
+</div>
+<video id="v" playsinline muted style="display:none"></video>
+
+<script>
+const cv=document.getElementById('c'),ctx=cv.getContext('2d'),vid=document.getElementById('v');
+const ui=document.getElementById('ui'),hud=document.getElementById('hud'),tagEl=document.getElementById('tag');
+let W=0,H=0,dpr=Math.min(devicePixelRatio||1,2);
+function resize(){W=innerWidth;H=innerHeight;cv.width=W*dpr;cv.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0)}
+addEventListener('resize',resize);resize();
+function tag(t){tagEl.style.display='block';tagEl.textContent=t}
+
+const NT=8,NS=16;
+const tents=[];
+for(let i=0;i<NT;i++)tents.push({t:-1+2*i/(NT-1),p:[]});
+const KEYS=['top','chin','l','r'];
+const tgt={},sm={};
+let headOk=false,fresh=true,mode='none',fit=null,t0=performance.now(),prevM=null,look={x:0,y:0};
+
+function setHead(top,chin,l,r){tgt.top=top;tgt.chin=chin;tgt.l=l;tgt.r=r;headOk=true}
+
+function geom(){
+  for(const k of KEYS){
+    if(!sm[k]||fresh)sm[k]={x:tgt[k].x,y:tgt[k].y};
+    else{sm[k].x+=(tgt[k].x-sm[k].x)*0.5;sm[k].y+=(tgt[k].y-sm[k].y)*0.5}
+  }
+  const {top,chin,l,r}=sm;
+  let ux=top.x-chin.x,uy=top.y-chin.y;const ul=Math.hypot(ux,uy)||1;ux/=ul;uy/=ul;
+  let rx=-uy,ry=ux;if(rx*(r.x-l.x)+ry*(r.y-l.y)<0){rx=-rx;ry=-ry}
+  const fw=Math.max(40,Math.hypot(r.x-l.x,r.y-l.y));
+  return{top,chin,u:{x:ux,y:uy},r:{x:rx,y:ry},fw,c:{x:(top.x+chin.x)/2,y:(top.y+chin.y)/2}};
+}
+const anchorOf=(g,t)=>({x:g.top.x-g.u.x*0.08*g.fw+g.r.x*t*0.55*g.fw,y:g.top.y-g.u.y*0.08*g.fw+g.r.y*t*0.55*g.fw});
+
+function resetTents(g){
+  const seg=1.5*g.fw/(NS-1);
+  for(const T of tents){
+    const a=anchorOf(g,T.t);T.p=[];
+    for(let j=0;j<NS;j++)T.p.push({x:a.x,y:a.y+seg*j,px:a.x,py:a.y+seg*j});
+  }
+}
+
+function stepTents(g,dt,time){
+  const seg=1.5*g.fw/(NS-1),G=g.fw*9;
+  const A=0.6*g.fw,B=0.72*g.fw;
+  tents.forEach((T,i)=>{
+    const P=T.p,a=anchorOf(g,T.t);
+    for(let j=1;j<NS;j++){
+      const p=P[j],vx=(p.x-p.px)*0.975,vy=(p.y-p.py)*0.975;
+      p.px=p.x;p.py=p.y;
+      const f=j/NS;
+      // idle wiggle + slight outward bias so tentacles frame the face
+      const wig=Math.sin(time*0.004+i*0.9+j*0.45)*g.fw*0.0028*f;
+      p.x+=vx+wig+T.t*g.fw*0.0012*f;p.y+=vy+G*dt*dt;
+    }
+    for(let it=0;it<12;it++){
+      P[0].x=a.x;P[0].y=a.y;
+      for(let j=0;j<NS-1;j++){
+        const p=P[j],q=P[j+1];let dx=q.x-p.x,dy=q.y-p.y;const d=Math.hypot(dx,dy)||0.001,df=(d-seg)/d;
+        if(j===0){q.x-=dx*df;q.y-=dy*df}else{p.x+=dx*df*.5;p.y+=dy*df*.5;q.x-=dx*df*.5;q.y-=dy*df*.5}
+      }
+      // keep tentacles off the face (ellipse around the head)
+      for(let j=1;j<NS;j++){
+        const p=P[j],dx=p.x-g.c.x,dy=p.y-g.c.y;
+        let lx=(dx*g.r.x+dy*g.r.y)/A,ly=(dx*g.u.x+dy*g.u.y)/B;
+        const len=Math.hypot(lx,ly);
+        if(len<1){const s=1.03/(len||0.001);if(!len){lx=T.t>=0?1:-1;ly=0}else{lx*=s;ly*=s}
+          p.x=g.c.x+g.r.x*lx*A+g.u.x*ly*B;p.y=g.c.y+g.r.y*lx*A+g.u.y*ly*B}
+      }
+    }
+    P[0].x=a.x;P[0].y=a.y;
+  });
+}
+
+function drawTents(g){
+  ctx.lineCap='round';ctx.lineJoin='round';
+  const wAt=j=>g.fw*(0.15*(1-j/(NS-1))+0.025);
+  tents.forEach((T,i)=>{
+    const P=T.p;
+    for(let j=0;j<NS-1;j++){
+      ctx.strokeStyle='#3a1360';ctx.lineWidth=(wAt(j)+wAt(j+1))/2+g.fw*0.025;
+      ctx.beginPath();ctx.moveTo(P[j].x,P[j].y);ctx.lineTo(P[j+1].x,P[j+1].y);ctx.stroke();
+    }
+    for(let j=0;j<NS-1;j++){
+      const s=j/(NS-1);
+      ctx.strokeStyle=`hsl(${285+40*s},65%,${44+20*s}%)`;ctx.lineWidth=(wAt(j)+wAt(j+1))/2;
+      ctx.beginPath();ctx.moveTo(P[j].x,P[j].y);ctx.lineTo(P[j+1].x,P[j+1].y);ctx.stroke();
+    }
+    const side=T.t<0?1:-1;
+    for(let j=3;j<NS-2;j+=2){
+      let dx=P[j+1].x-P[j-1].x,dy=P[j+1].y-P[j-1].y;const l=Math.hypot(dx,dy)||1;
+      const nx=-dy/l*side,ny=dx/l*side,w=wAt(j);
+      ctx.fillStyle='rgba(255,222,246,.85)';ctx.beginPath();ctx.arc(P[j].x+nx*w*0.18,P[j].y+ny*w*0.18,w*0.26,0,6.283);ctx.fill();
+    }
+  });
+}
+
+function drawDome(g,time){
+  const m={x:g.top.x+g.u.x*0.30*g.fw,y:g.top.y+g.u.y*0.30*g.fw};
+  if(prevM){look.x+=((m.x-prevM.x)-look.x)*0.2;look.y+=((m.y-prevM.y)-look.y)*0.2}
+  prevM=m;
+  const fw=g.fw,rx=0.62*fw,ry=0.56*fw;
+  ctx.save();ctx.translate(m.x,m.y);ctx.rotate(Math.atan2(g.u.x,-g.u.y));
+  const bob=1+Math.sin(time*0.005)*0.015;ctx.scale(1,bob);
+  const gr=ctx.createRadialGradient(-rx*.3,-ry*.4,fw*0.05,0,0,rx*1.1);
+  gr.addColorStop(0,'#e3a6f7');gr.addColorStop(.55,'#9b3fd0');gr.addColorStop(1,'#561f8a');
+  ctx.fillStyle=gr;ctx.strokeStyle='#3a1360';ctx.lineWidth=fw*0.025;
+  ctx.beginPath();ctx.ellipse(0,0,rx,ry,0,0,6.283);ctx.fill();ctx.stroke();
+  // spots
+  ctx.fillStyle='rgba(60,15,100,.35)';
+  [[-.3,-.3,.07],[.25,-.38,.05],[.38,-.1,.06],[-.1,-.45,.04],[.05,-.2,.05]].forEach(s=>{ctx.beginPath();ctx.arc(s[0]*fw,s[1]*fw,s[2]*fw,0,6.283);ctx.fill()});
+  // gloss
+  ctx.fillStyle='rgba(255,255,255,.4)';ctx.beginPath();ctx.ellipse(-rx*.35,-ry*.5,rx*.2,ry*.1,-0.6,0,6.283);ctx.fill();
+  // eyes
+  const lk=Math.max(-1,Math.min(1,look.x*0.12)),lv=Math.max(-1,Math.min(1,look.y*0.12));
+  [-1,1].forEach(s=>{
+    const ex=s*0.25*fw,ey=0.1*fw,er=0.13*fw;
+    ctx.fillStyle='#fff';ctx.strokeStyle='#3a1360';ctx.lineWidth=fw*0.014;
+    ctx.beginPath();ctx.arc(ex,ey,er,0,6.283);ctx.fill();ctx.stroke();
+    ctx.fillStyle='#1b0a2e';ctx.beginPath();ctx.arc(ex+lk*er*.5,ey+lv*er*.5,er*.5,0,6.283);ctx.fill();
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(ex+lk*er*.5-er*.15,ey+lv*er*.5-er*.15,er*.14,0,6.283);ctx.fill();
+  });
+  ctx.restore();
+}
+
+function drawVideo(){
+  const vw=vid.videoWidth,vh=vid.videoHeight;if(!vw)return null;
+  const s=Math.max(W/vw,H/vh),dw=vw*s,dh=vh*s,ox=(W-dw)/2,oy=(H-dh)/2;
+  ctx.save();ctx.translate(W,0);ctx.scale(-1,1);ctx.drawImage(vid,ox,oy,dw,dh);ctx.restore();
+  return{s,dw,dh,ox,oy};
+}
+function grid(){ctx.fillStyle='#120d18';ctx.fillRect(0,0,W,H);ctx.strokeStyle='#ffffff10';for(let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke()}for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke()}}
+
+let wasOk=false;
+function loop(now){
+  const dt=Math.min(0.033,(now-t0)/1000||0.016);t0=now;
+  if(mode==='cam')fit=drawVideo()||fit;else grid();
+  if(mode==='demo'&&headOk){ // placeholder face
+    ctx.strokeStyle='#ffffff55';ctx.lineWidth=2;const fw=Math.min(W,H)*0.3;
+    ctx.beginPath();ctx.ellipse((tgt.top.x+tgt.chin.x)/2,(tgt.top.y+tgt.chin.y)/2,fw*0.6,fw*0.72,0,0,6.283);ctx.stroke();
+  }
+  if(mode!=='none'){
+    if(headOk){
+      if(!wasOk)fresh=true;
+      const g=geom();
+      if(fresh){resetTents(g);prevM=null;fresh=false}
+      stepTents(g,dt/2,now);stepTents(g,dt/2,now);
+      drawTents(g);drawDome(g,now);
+      hud.textContent=mode==='cam'?'Shake, nod and tilt your head 🐙':'Drag to move the head';
+    }else hud.textContent=mode==='cam'?'Show your face to the camera':'';
+    wasOk=headOk;
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---- Demo (touch) mode ----
+function startDemo(){
+  mode='demo';ui.style.display='none';tag('Demo mode');
+  const fw=Math.min(W,H)*0.3;let cx=W/2,cy=H*0.55;
+  const put=()=>setHead({x:cx,y:cy-fw*0.72},{x:cx,y:cy+fw*0.72},{x:cx-fw*0.5,y:cy},{x:cx+fw*0.5,y:cy});
+  put();
+  let down=false;
+  cv.addEventListener('pointerdown',e=>{down=true;cx=e.clientX;cy=e.clientY;put()});
+  cv.addEventListener('pointermove',e=>{if(down){cx=e.clientX;cy=e.clientY;put()}});
+  addEventListener('pointerup',()=>down=false);
+}
+
+// ---- Camera + face tracking ----
+const BASE='https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/';
+const loadScript=src=>new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(new Error('script'));document.head.appendChild(s)});
+const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms))]);
+
+async function startCam(){
+  const btn=document.getElementById('go');btn.textContent='Starting…';btn.disabled=true;
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:960},height:{ideal:720}},audio:false});
+    vid.srcObject=stream;await vid.play();
+    mode='cam';ui.style.display='none';hud.textContent='Loading face tracker…';
+    let fm=null;
+    try{
+      await withTimeout(loadScript(BASE+'face_mesh.js'),6000);
+      fm=new FaceMesh({locateFile:f=>BASE+f});
+      fm.setOptions({maxNumFaces:1,refineLandmarks:false,minDetectionConfidence:0.5,minTrackingConfidence:0.5});
+      fm.onResults(r=>{
+        const L=r.multiFaceLandmarks&&r.multiFaceLandmarks[0];
+        if(!L||!fit){headOk=false;return}
+        const m=i=>({x:W-(L[i].x*fit.dw+fit.ox),y:L[i].y*fit.dh+fit.oy});
+        setHead(m(10),m(152),m(234),m(454));
+      });
+      await withTimeout(fm.initialize(),12000);
+    }catch(e){fm=null}
+    if(!fm){tag('Backup tracker (face model failed to load)');startSkin();return}
+    tag('Full face tracking');
+    let busy=false;
+    const pump=async()=>{
+      if(!busy&&vid.readyState>=2){busy=true;try{await fm.send({image:vid})}catch(e){}busy=false}
+      requestAnimationFrame(pump);
+    };
+    pump();
+  }catch(err){
+    mode='none';ui.style.display='flex';btn.disabled=false;btn.textContent='Retry camera';
+    ui.querySelector('p').textContent=(!navigator.mediaDevices?'This page isn’t allowed to use the camera API here.':(err&&err.name==='NotAllowedError')?'Camera access was blocked. Either you tapped Block, or this embedded page isn’t permitted to ask for the camera.':'Camera error ('+((err&&err.name)||'unknown')+').')+' If it keeps happening, host the file on your own HTTPS site (e.g. GitHub Pages), or use the no-camera mode.';
+    if(vid.srcObject)vid.srcObject.getTracks().forEach(t=>t.stop());
+  }
+}
+
+// Backup: largest skin-colored blob = head (no model needed, less precise)
+function startSkin(){
+  const sw=96,sh=72,sc=document.createElement('canvas');sc.width=sw;sc.height=sh;
+  const sx=sc.getContext('2d',{willReadFrequently:true});
+  const lab=new Uint8Array(sw*sh),stk=new Int32Array(sw*sh);
+  (function tick(){
+    if(vid.readyState>=2&&fit){
+      sx.drawImage(vid,0,0,sw,sh);const d=sx.getImageData(0,0,sw,sh).data,m=new Uint8Array(sw*sh);
+      for(let i=0;i<sw*sh;i++){
+        const R=d[i*4],G=d[i*4+1],B=d[i*4+2],cb=128-.1687*R-.3313*G+.5*B,cr=128+.5*R-.4187*G-.0813*B,y=.299*R+.587*G+.114*B;
+        m[i]=(y>50&&cb>=77&&cb<=127&&cr>=133&&cr<=173)?1:0;
+      }
+      lab.fill(0);let best=null;
+      for(let s=0;s<sw*sh;s++){
+        if(!m[s]||lab[s])continue;
+        let sp=0;stk[sp++]=s;lab[s]=1;const b={a:0,x0:sw,x1:0,y0:sh};
+        while(sp){
+          const p=stk[--sp],px=p%sw,py=(p/sw)|0;b.a++;
+          if(px<b.x0)b.x0=px;if(px>b.x1)b.x1=px;if(py<b.y0)b.y0=py;
+          if(px>0&&m[p-1]&&!lab[p-1]){lab[p-1]=1;stk[sp++]=p-1}
+          if(px<sw-1&&m[p+1]&&!lab[p+1]){lab[p+1]=1;stk[sp++]=p+1}
+          if(py>0&&m[p-sw]&&!lab[p-sw]){lab[p-sw]=1;stk[sp++]=p-sw}
+          if(py<sh-1&&m[p+sw]&&!lab[p+sw]){lab[p+sw]=1;stk[sp++]=p+sw}
+        }
+        if(!best||b.a>best.a)best=b;
+      }
+      if(best&&best.a>sw*sh*0.03){
+        const w=best.x1-best.x0,cx=(best.x0+best.x1)/2,chinY=best.y0+1.35*w,midY=(best.y0+chinY)/2;
+        const S=(x,y)=>({x:W-(x/sw*fit.dw+fit.ox),y:y/sh*fit.dh+fit.oy});
+        setHead(S(cx,best.y0),S(cx,chinY),S(best.x0,midY),S(best.x1,midY));
+      }else headOk=false;
+    }
+    requestAnimationFrame(tick);
+  })();
+}
+
+document.getElementById('go').onclick=startCam;
+document.getElementById('demo').onclick=startDemo;
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
